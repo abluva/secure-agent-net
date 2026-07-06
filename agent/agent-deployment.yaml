@@ -67,7 +67,7 @@ spec:
       serviceAccountName: agent
       containers:
         - name: agent-container
-          image: 172.16.1.87:5000/ablv-launcher:v30
+          image: 172.16.1.87:5000/ablv-launcher:v31
           ports:
             - containerPort: 5004
           env:
