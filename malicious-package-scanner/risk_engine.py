@@ -10,6 +10,7 @@ import json
 import requests
 import argparse
 import os
+import re
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -37,7 +38,7 @@ except FileNotFoundError:
     MAL_DB = {}
 
 # Common/popular packages for typosquatting detection
-POPULAR = ["requests", "flask", "django", "lodash", "react", "express", 
+POPULAR = ["requests", "flask", "django", "lodash", "react", "express",
            "numpy", "pandas", "tensorflow", "pytest", "pip", "setuptools"]
 
 # Ecosystem mappings
@@ -79,13 +80,89 @@ def is_cache_valid(cache_path: str) -> bool:
         return False
 
 # ============================================================================
+# VERSION COMPARISON (generic, dependency-free)
+# ============================================================================
+# OSV advisories express affected versions either as an explicit list
+# ("versions": ["1.2.3", "1.2.4"]) or as semver-style ranges ("ranges":
+# [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "2.0.0"}]}]).
+# This is a lightweight, dependency-free comparator good enough for the
+# dotted-numeric versions used by npm/PyPI/etc. It intentionally does not
+# try to be a full semver/PEP440 implementation.
+
+def _parse_version(v: str) -> Tuple[int, ...]:
+    """Parse a version string into a comparable tuple of ints.
+    Strips prerelease/build metadata (anything after '-' or '+')."""
+    if v is None:
+        return (0,)
+    core = re.split(r"[-+]", v, 1)[0]
+    parts = core.split(".")
+    out = []
+    for p in parts:
+        m = re.match(r"\d+", p)
+        out.append(int(m.group()) if m else 0)
+    return tuple(out) if out else (0,)
+
+def _cmp_versions(a: str, b: str) -> int:
+    """Return -1, 0, or 1 comparing version a to version b."""
+    ta, tb = _parse_version(a), _parse_version(b)
+    length = max(len(ta), len(tb))
+    ta = ta + (0,) * (length - len(ta))
+    tb = tb + (0,) * (length - len(tb))
+    if ta < tb:
+        return -1
+    if ta > tb:
+        return 1
+    return 0
+
+def _version_in_ranges(version: str, ranges: List[Dict]) -> bool:
+    """Check whether `version` falls inside any OSV-style range."""
+    for r in ranges or []:
+        if r.get("type") not in ("SEMVER", "ECOSYSTEM"):
+            continue
+        events = r.get("events", [])
+        introduced = None
+        fixed = None
+        last_affected = None
+        for e in events:
+            if "introduced" in e:
+                introduced = e["introduced"]
+            if "fixed" in e:
+                fixed = e["fixed"]
+            if "last_affected" in e:
+                last_affected = e["last_affected"]
+
+        if introduced is not None and introduced != "0":
+            if _cmp_versions(version, introduced) < 0:
+                continue
+        if fixed is not None:
+            if _cmp_versions(version, fixed) >= 0:
+                continue
+        if last_affected is not None:
+            if _cmp_versions(version, last_affected) > 0:
+                continue
+        return True
+    return False
+
+# ============================================================================
 # OPENSSF CHECKS
 # ============================================================================
 
-def check_openssf(package: str, ecosystem: str) -> Dict:
+def check_openssf(package: str, ecosystem: str, version: Optional[str] = None) -> Dict:
     """
-    Check package against OpenSSF malicious packages database
-    Returns: {"found": bool, "matches": [], "risk_score": int}
+    Check package against OpenSSF malicious packages database.
+
+    THE FIX: this now takes `version` and only reports a CRITICAL / MALICIOUS_KNOWN
+    match when the queried version actually falls within the advisory's affected
+    versions/ranges. Previously this matched on package name alone, so every
+    version of a package that ever had *any* malicious release (e.g. ansi-styles,
+    color, chalk) was flagged CRITICAL, even versions published years before the
+    compromise.
+
+    If no version is supplied, we can't confirm an exact match, so we surface a
+    lower-confidence NEEDS_REVIEW finding instead of a false CRITICAL, and list
+    the actually-known-malicious versions so the caller can compare manually.
+
+    Returns: {"found": bool, "matches": [], "risk_level": str, "risk_score": int}
     """
     result = {
         "source": "openssf",
@@ -94,14 +171,30 @@ def check_openssf(package: str, ecosystem: str) -> Dict:
         "risk_level": "SAFE",
         "risk_score": 0
     }
-    
-    # Normalize ecosystem
+
     eco = ecosystem.lower()
-    
-    # Check if package exists in malicious database
-    if eco in MAL_DB:
-        for mal_pkg in MAL_DB[eco].keys():
-            if mal_pkg.lower() == package.lower():
+
+    if eco not in MAL_DB:
+        return result
+
+    for mal_pkg, entry in MAL_DB[eco].items():
+        if mal_pkg.lower() != package.lower():
+            continue
+
+        # Backward-compat: tolerate an old-format index (bool) if someone
+        # hasn't rebuilt it yet, by treating it as "no version data available".
+        if not isinstance(entry, dict):
+            entry = {"versions": [], "ranges": [], "advisory_ids": []}
+
+        known_versions = entry.get("versions", [])
+        ranges = entry.get("ranges", [])
+        advisory_ids = entry.get("advisory_ids", [])
+
+        if version:
+            version_matches = (
+                version in known_versions or _version_in_ranges(version, ranges)
+            )
+            if version_matches:
                 result["found"] = True
                 result["risk_level"] = "CRITICAL"
                 result["risk_score"] = 100
@@ -109,10 +202,32 @@ def check_openssf(package: str, ecosystem: str) -> Dict:
                     "package": mal_pkg,
                     "ecosystem": eco,
                     "type": "MALICIOUS_KNOWN",
-                    "description": "Found in OpenSSF malicious packages database"
+                    "matched_version": version,
+                    "known_malicious_versions": known_versions,
+                    "advisory_ids": advisory_ids,
+                    "description": "Version confirmed in OpenSSF malicious packages database"
                 })
-                break
-    
+            # else: name matches a package with a known bad release, but this
+            # specific version isn't one of them -> leave as SAFE (no match).
+        else:
+            # No version provided at all (e.g. a bare package-name lookup).
+            # Don't claim CRITICAL without evidence this version is affected.
+            result["found"] = True
+            result["risk_level"] = "HIGH"
+            result["risk_score"] = 60
+            result["matches"].append({
+                "package": mal_pkg,
+                "ecosystem": eco,
+                "type": "NEEDS_VERSION_CHECK",
+                "known_malicious_versions": known_versions,
+                "advisory_ids": advisory_ids,
+                "description": (
+                    "Package has known malicious version(s) in OpenSSF database, "
+                    "but no version was supplied to confirm an exact match"
+                )
+            })
+        break
+
     return result
 
 # ============================================================================
@@ -134,14 +249,14 @@ def query_osv_api(purl: str) -> Optional[Dict]:
     try:
         url = "https://api.osv.dev/v1/query"
         payload = {"package": {"purl": purl}}
-        
+
         response = requests.post(
             url,
             json=payload,
             timeout=10,
             headers={"User-Agent": "mallscan-enhanced/1.0"}
         )
-        
+
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:
@@ -168,10 +283,10 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
         "risk_level": "SAFE",
         "risk_score": 0
     }
-    
+
     purl = build_purl(package, ecosystem, version)
     cache_path = get_osv_cache_path(purl)
-    
+
     # Try cache first
     osv_data = None
     if is_cache_valid(cache_path):
@@ -180,14 +295,14 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
             osv_data = cached["data"]
         except Exception:
             pass
-    
+
     # Query API if not cached
     if osv_data is None:
         osv_data = query_osv_api(purl)
         if osv_data is None:
             result["risk_level"] = "UNKNOWN"
             return result
-        
+
         # Cache the result
         try:
             cache_data = {
@@ -199,16 +314,16 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
                 json.dump(cache_data, f)
         except Exception as e:
             print(f"[!] Failed to cache OSV data: {e}", file=sys.stderr)
-    
+
     # Process vulnerabilities
     vulns = osv_data.get("vulns", [])
     if vulns:
         result["found"] = True
-        
+
         # Calculate risk score based on severity
         severity_scores = {"CRITICAL": 100, "HIGH": 80, "MEDIUM": 50, "LOW": 20}
         max_score = 0
-        
+
         for vuln in vulns:
             vuln_entry = {
                 "id": vuln.get("id", ""),
@@ -217,7 +332,7 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
                 "severity": "",
                 "affected_ranges": []
             }
-            
+
             # Extract severity if available
             severity = "MEDIUM"  # default
             if "severity" in vuln:
@@ -228,9 +343,9 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
                     severity = "CRITICAL"
                 elif "high" in details:
                     severity = "HIGH"
-            
+
             vuln_entry["severity"] = severity
-            
+
             # Check if version is affected
             if version and "affected" in vuln:
                 affected = vuln["affected"]
@@ -238,12 +353,12 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
                     if aff.get("package", {}).get("name", "").lower() == package.lower():
                         ranges = aff.get("ranges", [])
                         vuln_entry["affected_ranges"] = ranges
-            
+
             result["vulnerabilities"].append(vuln_entry)
             max_score = max(max_score, severity_scores.get(severity, 20))
-        
+
         result["risk_score"] = max_score
-        
+
         # Determine risk level
         if max_score >= 80:
             result["risk_level"] = "CRITICAL"
@@ -253,7 +368,7 @@ def check_osv(package: str, ecosystem: str, version: Optional[str] = None) -> Di
             result["risk_level"] = "MEDIUM"
         else:
             result["risk_level"] = "LOW"
-    
+
     return result
 
 # ============================================================================
@@ -283,7 +398,7 @@ def check_new_package(package: str, ecosystem: str) -> Tuple[bool, Optional[int]
                     age_days = (datetime.now(upload_date.tzinfo) - upload_date).days
                     if age_days < 7:
                         return True, age_days
-        
+
         elif ecosystem == "npm":
             r = requests.get(f"https://registry.npmjs.org/{package}", timeout=5)
             if r.status_code == 200:
@@ -296,7 +411,7 @@ def check_new_package(package: str, ecosystem: str) -> Tuple[bool, Optional[int]
                         return True, age_days
     except Exception:
         pass
-    
+
     return False, None
 
 def check_low_popularity(package: str, ecosystem: str) -> Tuple[bool, Optional[int]]:
@@ -311,13 +426,13 @@ def check_low_popularity(package: str, ecosystem: str) -> Tuple[bool, Optional[i
                     return True, version_count
     except Exception:
         pass
-    
+
     return False, None
 
 def run_heuristic_checks(package: str, ecosystem: str) -> List[Dict]:
     """Run all heuristic checks"""
     risks = []
-    
+
     # Typosquatting check
     is_typo, candidates = check_typosquatting(package)
     if is_typo:
@@ -327,7 +442,7 @@ def run_heuristic_checks(package: str, ecosystem: str) -> List[Dict]:
             "description": f"Resembles legitimate package(s): {', '.join(candidates)}",
             "score": 40
         })
-    
+
     # New package check
     is_new, age = check_new_package(package, ecosystem)
     if is_new:
@@ -337,7 +452,7 @@ def run_heuristic_checks(package: str, ecosystem: str) -> List[Dict]:
             "description": f"Published {age} day(s) ago",
             "score": 20
         })
-    
+
     # Low popularity check
     is_unpopular, count = check_low_popularity(package, ecosystem)
     if is_unpopular:
@@ -347,7 +462,7 @@ def run_heuristic_checks(package: str, ecosystem: str) -> List[Dict]:
             "description": f"Only {count} version(s) published",
             "score": 15
         })
-    
+
     return risks
 
 # ============================================================================
@@ -377,19 +492,23 @@ def combine_results(
         "risk_level": "SAFE",
         "risk_score": 0
     }
-    
+
     # If found in OpenSSF (malicious), highest priority
     if openssf_result["found"]:
-        combined["risk_level"] = "CRITICAL"
-        combined["risk_score"] = 100
+        combined["risk_level"] = openssf_result["risk_level"]
+        combined["risk_score"] = openssf_result["risk_score"]
         combined["findings"].append({
             "category": "MALICIOUS",
             "source": "openssf",
-            "description": "Package is in OpenSSF malicious packages database",
+            "description": "Package matched OpenSSF malicious packages database",
             "details": openssf_result["matches"]
         })
-        return combined
-    
+        # A confirmed CRITICAL match short-circuits (this is a genuine hit).
+        # A HIGH "needs version check" finding still lets OSV/heuristics add
+        # more context below rather than masking everything.
+        if openssf_result["risk_level"] == "CRITICAL":
+            return combined
+
     # OSV vulnerabilities
     if osv_result["found"]:
         combined["findings"].append({
@@ -399,7 +518,7 @@ def combine_results(
             "details": osv_result["vulnerabilities"]
         })
         combined["risk_score"] = max(combined["risk_score"], osv_result["risk_score"])
-    
+
     # Heuristic risks
     if heuristic_risks:
         combined["findings"].append({
@@ -410,8 +529,8 @@ def combine_results(
         })
         heuristic_score = sum(r.get("score", 0) for r in heuristic_risks)
         combined["risk_score"] = min(combined["risk_score"] + heuristic_score, 100)
-    
-    # Determine final risk level
+
+    # Determine final risk level (skip if openssf already set CRITICAL and returned above)
     if combined["risk_score"] >= 80:
         combined["risk_level"] = "CRITICAL"
     elif combined["risk_score"] >= 50:
@@ -419,8 +538,8 @@ def combine_results(
     elif combined["risk_score"] >= 20:
         combined["risk_level"] = "MEDIUM"
     else:
-        combined["risk_level"] = "SAFE"
-    
+        combined["risk_level"] = combined["risk_level"] if combined["risk_level"] != "SAFE" else "SAFE"
+
     return combined
 
 # ============================================================================
@@ -435,11 +554,11 @@ def format_terminal_output(result: Dict) -> int:
     BLUE = '\033[0;34m'
     MAGENTA = '\033[0;35m'
     NC = '\033[0m'
-    
+
     # Status indicators
     risk_level = result["risk_level"]
     risk_score = result["risk_score"]
-    
+
     if risk_level == "CRITICAL":
         status = f"{RED}🚨 CRITICAL{NC}"
         color = RED
@@ -452,12 +571,12 @@ def format_terminal_output(result: Dict) -> int:
     else:
         status = f"{GREEN}✅ SAFE{NC}"
         color = GREEN
-    
+
     # Header
     print(f"\n{BLUE}{'='*70}{NC}")
     print(f"{BLUE}Package Analysis Report (OpenSSF + OSV){NC}")
     print(f"{BLUE}{'='*70}{NC}\n")
-    
+
     # Basic info
     print(f"Package:      {result.get('package', 'N/A')}")
     print(f"Ecosystem:    {result.get('ecosystem', 'N/A')}")
@@ -466,7 +585,7 @@ def format_terminal_output(result: Dict) -> int:
     print(f"Status:       {status}")
     print(f"Risk Score:   {color}{risk_score}/100{NC}")
     print(f"Timestamp:    {result['timestamp']}\n")
-    
+
     # Findings
     findings = result.get("findings", [])
     if findings:
@@ -474,12 +593,16 @@ def format_terminal_output(result: Dict) -> int:
         for i, finding in enumerate(findings, 1):
             category = finding["category"]
             source = finding["source"]
-            
+
             if category == "MALICIOUS":
                 print(f"\n  {i}. {RED}[{source.upper()}] MALICIOUS PACKAGE{NC}")
                 for match in finding["details"]:
                     print(f"     - {match['description']}")
-            
+                    if match.get("matched_version"):
+                        print(f"       Matched version: {match['matched_version']}")
+                    if match.get("known_malicious_versions"):
+                        print(f"       Known malicious versions: {', '.join(match['known_malicious_versions'])}")
+
             elif category == "VULNERABILITIES":
                 count = finding["count"]
                 print(f"\n  {i}. {YELLOW}[{source.upper()}] {count} VULNERABILITY/IES{NC}")
@@ -488,7 +611,7 @@ def format_terminal_output(result: Dict) -> int:
                     sev_color = RED if severity == "CRITICAL" else YELLOW if severity in ["HIGH", "MEDIUM"] else GREEN
                     print(f"     - {vuln['id']}: {vuln['summary'][:60]}...")
                     print(f"       Severity: {sev_color}{severity}{NC}")
-            
+
             elif category == "HEURISTICS":
                 count = finding["count"]
                 print(f"\n  {i}. {YELLOW}[{source.upper()}] {count} HEURISTIC RISK(S){NC}")
@@ -496,9 +619,9 @@ def format_terminal_output(result: Dict) -> int:
                     print(f"     - {risk['type']}: {risk['description']}")
     else:
         print(f"{GREEN}No risks detected{NC}")
-    
+
     print(f"\n{BLUE}{'='*70}{NC}\n")
-    
+
     # Return exit code
     return 0 if risk_level == "SAFE" else 1
 
@@ -515,32 +638,32 @@ def main():
     parser.add_argument("--version", help="Package version (optional)")
     parser.add_argument("--terminal", action="store_true", help="Format output for terminal")
     parser.add_argument("--combine-sources", action="store_true", help="Combine all sources (default)")
-    
+
     args = parser.parse_args()
-    
+
     package = args.name
     ecosystem = args.ecosystem.lower()
     version = args.version
-    
+
     # Run checks from all sources
-    openssf_result = check_openssf(package, ecosystem)
+    openssf_result = check_openssf(package, ecosystem, version)
     osv_result = check_osv(package, ecosystem, version)
     heuristic_risks = run_heuristic_checks(package, ecosystem)
-    
+
     # Combine results
     combined = combine_results(openssf_result, osv_result, heuristic_risks)
     combined["package"] = package
     combined["ecosystem"] = ecosystem
     if version:
         combined["version"] = version
-    
+
     # Output
     if args.terminal:
         exit_code = format_terminal_output(combined)
     else:
         print(json.dumps(combined, indent=2))
         exit_code = 0
-    
+
     sys.exit(exit_code)
 
 if __name__ == "__main__":
