@@ -73,14 +73,12 @@ spec:
           env:
              - name: INFRA_BASE_URL
               value: "http://control-server:80"
-            - name: SAAS_API_KEY
-              value: "<SAAS_API_KEY_PLACEHOLDER>"  
             - name: X_ABLV_Tenant_ID
               value: "<TENANT_ID_PLACEHOLDER>"
             - name: X_ABLV_Environment_ID
               value: "<ENVIRONMENT_ID_PLACEHOLDER>" 
             - name: X_ABLV_Principal
-              value: "<PRINCIPAL_PLACEHOLDER>"  
+              value: "tenant-admin"  
 ---
 apiVersion: v1
 kind: Service
@@ -97,13 +95,3 @@ spec:
     - protocol: TCP
       port: 5004
       targetPort: 5004
----
-apiVersion: skupper.io/v2alpha1
-kind: Connector
-metadata:
-  name: agent-connector
-  namespace: <tenant-namespace>
-spec:
-  routingKey: agent
-  selector: tier=agent
-  port: 5004
