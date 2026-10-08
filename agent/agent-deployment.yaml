@@ -76,8 +76,6 @@ spec:
           env:
             - name: INFRA_BASE_URL
               value: "http://control-server:80"
-            - name: SAAS_API_KEY
-              value: "<SAAS_API_KEY_PLACEHOLDER>"
             - name: X_ABLV_Tenant_ID
               value: "<tenantId>"
             - name: X_ABLV_Environment_ID
