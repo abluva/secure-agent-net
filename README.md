@@ -8,10 +8,9 @@ Install the Connect Agent and launcher on your Kubernetes cluster or Linux VM. V
 connect-agent/kubernetes/          tenant-start.sh
 connect-agent/vm/k3s-appliance/    install.sh
 agent/agent-deployment.yaml        launcher + agent-svc
-privacy/privacy-deployment.yaml    pseudonymizer + data-privacy-svc
 ```
 
-The installers replace only `<tenant-namespace>`, `<tenantId>`, and `<envid>` in the agent and privacy YAMLs. Everything else in those files is used as-is.
+The installers replace only `<tenant-namespace>`, `<tenantId>`, and `<envid>` in the agent YAML. Everything else in that file is used as-is.
 
 ---
 
@@ -50,11 +49,11 @@ chmod +x tenant-start.sh
 ./tenant-start.sh ./tenant-start.env
 ```
 
-Needs `kubectl` and `python3`. The script creates the namespace (label `abluva.io/tenant=true`), secrets, Connect Agent DaemonSet, applies `../../agent/agent-deployment.yaml` and `../../privacy/privacy-deployment.yaml`, applies NetworkPolicy (same-ns + Abluva SaaS ns; opt-in cross-tenant with `abluva.io/cross-tenant=true`), then waits on `daemonset/connect-agent`.
+Needs `kubectl` and `python3`. The script creates the namespace (label `abluva.io/tenant=true`), secrets, Connect Agent DaemonSet, applies `../../agent/agent-deployment.yaml`, applies NetworkPolicy (same-ns + Abluva SaaS ns; opt-in cross-tenant with `abluva.io/cross-tenant=true`), then waits on `daemonset/connect-agent`.
 
 ```bash
 kubectl -n <TENANT_NAMESPACE> get pods
-kubectl -n <TENANT_NAMESPACE> get svc agent-svc data-privacy-svc
+kubectl -n <TENANT_NAMESPACE> get svc agent-svc
 ```
 
 ---
@@ -72,11 +71,11 @@ chmod +x install.sh
 sudo ./install.sh --env-file=./fabric-edge.env
 ```
 
-This installs k3s if needed, deploys Connect Agent in `fabric-edge`, then applies `agent/agent-deployment.yaml` and `privacy/privacy-deployment.yaml` in the same namespace.
+This installs k3s if needed, deploys Connect Agent in `fabric-edge`, then applies `agent/agent-deployment.yaml` in the same namespace.
 
 ```bash
 k3s kubectl -n fabric-edge get pods
-k3s kubectl -n fabric-edge get svc agent-svc data-privacy-svc
+k3s kubectl -n fabric-edge get svc agent-svc
 ```
 
 ---
@@ -90,7 +89,6 @@ Fill **Host** and **Port** (placeholders on the form):
 | Row | Host | Port |
 |---|---|---|
 | launcher | `agent-svc` | `5004` |
-| pseudonymizer | `data-privacy-svc` | `8080` |
 
 **Create** stays disabled until an Agent is Connected (hover on **Create**). After a successful create, the page lists each name and status.
 
