@@ -1,5 +1,5 @@
-# Hybrid-SaaS: Kube-Agent (Launcher) — deployed on tenant's cluster
-# Sibling of connect-agent/. Installers replace only:
+# Hybrid: customer-side launcher — aligned with k8s/saas-agent.yaml.
+# Installers replace only:
 #   <tenant-namespace>  <tenantId>  <envid>
 apiVersion: v1
 kind: ServiceAccount
@@ -15,24 +15,24 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods", "services", "secrets", "configmaps", "serviceaccounts", "persistentvolumeclaims", "endpoints"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "replicasets", "daemonsets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
+    resources: ["ingresses", "networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  - apiGroups: ["skupper.io"]
-    resources: ["sites", "connectors", "listeners", "accesstokens", "accessgrants", "links", "routeraccesses"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  - apiGroups: ["skupper.io"]
-    resources: ["sites/status", "connectors/status", "listeners/status", "accesstokens/status", "accessgrants/status", "links/status", "routeraccesses/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+  - apiGroups: [""]
+    resources: ["events"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -70,18 +70,34 @@ spec:
       serviceAccountName: agent
       containers:
         - name: agent-container
-          image: 172.16.1.87:5000/ablv-launcher:v31
+          image: phx.ocir.io/axsfgj15p1je/launcher:3
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5004
           env:
+            # SaaS control-server FQDN (same cluster). Short name will not resolve
+            # from the tenant namespace.
             - name: INFRA_BASE_URL
-              value: "http://control-server:80"
-            - name: X_ABLV_Tenant_ID
+              value: "http://control-server-svc.3407e407-792a-452d-8bb4-03c54ac34d52-5620f907-0281-497d-9098-8c.svc.cluster.local:5001"
+            - name: X_ABLV_TENANT_ID
               value: "<tenantId>"
-            - name: X_ABLV_Environment_ID
+            - name: X_ABLV_ENVIRONMENT_ID
               value: "<envid>"
-            - name: X_ABLV_Principal
+            - name: X_ABLV_PRINCIPAL
               value: "tenant-admin"
+            - name: X_ABLV_PRINCIPAL_ROLE
+              value: "tenant-admin"
+            - name: X_SAAS_TENANT_ID
+              value: "3407e407-792a-452d-8bb4-03c54ac34d52"
+            - name: X_SAAS_ENVIRONMENT_ID
+              value: "5620f907-0281-497d-9098-8cfed51f5be1"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
 ---
 apiVersion: v1
 kind: Service
