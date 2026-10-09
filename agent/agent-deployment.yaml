@@ -70,7 +70,7 @@ spec:
       serviceAccountName: agent
       containers:
         - name: agent-container
-          image: phx.ocir.io/axsfgj15p1je/launcher:3
+          image: phx.ocir.io/axsfgj15p1je/launcher:4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5004
@@ -84,7 +84,7 @@ spec:
             - name: X_ABLV_ENVIRONMENT_ID
               value: "<envid>"
             - name: X_ABLV_PRINCIPAL
-              value: "tenant-admin"
+              value: "you@yourcompany.com"
             - name: X_ABLV_PRINCIPAL_ROLE
               value: "tenant-admin"
             - name: X_SAAS_TENANT_ID
