@@ -84,6 +84,15 @@ agent/agent-deployment.yaml        launcher + agent-svc
 - `<tenantId>`
 - `<envid>`
 
+**Before running the script**, edit `agent/agent-deployment.yaml` and set **`X_ABLV_PRINCIPAL`** to your login email (this becomes the `X-ABLV-Principal` header on launcher → control-server calls).
+
+```yaml
+- name: X_ABLV_PRINCIPAL
+  value: "you@yourcompany.com"   # your email — required
+- name: X_ABLV_PRINCIPAL_ROLE
+  value: "tenant-admin"          # keep unless your role differs
+```
+
 Everything else in that file (including SaaS control-server URL and SaaS IDs) is used as-is. You do not paste a SaaS API key into the launcher YAML.
 
 Put `ca.crt` and the Install env file next to the script you will run (Step 6). Ensure `BOOTSTRAP_TOKEN` and `ENVIRONMENT_ID` are set in the env file.
@@ -119,7 +128,7 @@ sudo ./install.sh --env-file=./fabric-edge.env
 | 1 | Create tenant namespace | Label `abluva.io/tenant=true` (Kubernetes). VM appliance uses `fabric-edge`. |
 | 2 | Create secrets | CA + bootstrap material for the Connect Agent |
 | 3 | Deploy Connect Agent | DaemonSet — Agent dials **out** to the platform gateway and control plane (no Skupper site, MetalLB, or link-token redeem) |
-| 4 | Deploy launcher | Applies `agent/agent-deployment.yaml` → `Deployment/agent` + `Service/agent-svc:5004` |
+| 4 | Deploy launcher | Applies `agent/agent-deployment.yaml` → `Deployment/agent` + `Service/agent-svc:5004` (must have set `X_ABLV_PRINCIPAL` email in Step 5) |
 | 5 | Apply NetworkPolicy | Same-ns + Abluva SaaS ns; opt-in cross-tenant with `abluva.io/cross-tenant=true` |
 | 6 | Wait for Agent | Waits until `daemonset/connect-agent` is ready |
 
@@ -155,41 +164,61 @@ Back on **Connect Agent** → **Customer registrations** → **Add registrations
 | Row | Host | Port |
 |---|---|---|
 | launcher | `agent-svc` | `5004` |
+| data-privacy (optional) | `data-privacy-svc` | `8080` |
 
-**Create** stays disabled until an Agent is Connected. After a successful create, the page lists each name and status.
+**Create** stays disabled until an Agent is Connected. After a successful create, the page lists each registration as:
+
+```text
+agent-launcher: Active → agent-launcher.<tenant-id>.connect.abluva.com:8444
+data-privacy: Active → data-privacy.<tenant-id>.connect.abluva.com:8444
+```
+
+That `host:port` is what **platform** apps use (Gateway inbound). Prefix with `https://` when you need a base URL. Do **not** put the form values (`agent-svc:5004`) in platform resource config — those are only for the Connect Agent inside the customer cluster.
 
 ---
 
-## Step 9: Register Resource in Platform
+## Step 9: Register Resource in Platform (launcher create)
 
-After the agent is deployed and verified:
+After customer registrations succeed on the **Connect Agent** tab:
 
-1. Navigate to **Resources** → **Register Resource**
-2. Give a **Resource Name** (e.g. `agent-launcher`)
-3. Choose Resource Type: `agent#https`
-4. Choose **Credentials** as Authentication Type
-5. In the JSON box, add:
+1. Copy the **agent-launcher** line’s `host:port` from that tab  
+   (e.g. `agent-launcher.<tenant-id>.connect.abluva.com:8444`)
+2. Navigate to **Resources** → **Register Resource** (or Create launcher resource)
+3. Give a **Resource Name** (e.g. `agent-launcher`)
+4. Choose Resource Type: `agent#https` (or your launcher type)
+5. Authentication: **Credentials**
+6. Set:
+
+| Field | Value |
+|---|---|
+| **base_url** | `https://` + host:port from Connect Agent tab |
+| **endpoint** | `api/v1/launcher/create` |
+
+Example (replace with your tenant’s host:port from the Connect tab):
 
 ```json
 {
-  "serviceUrl": "http://agent-svc.<namespace>.svc.cluster.local:5004"
+  "base_url": "https://agent-launcher.5d5fcf62-9efa-48d1-9132-e3becf4436e5.connect.abluva.com:8444",
+  "endpoint": "api/v1/launcher/create"
 }
 ```
 
-Replace `<namespace>` with your tenant namespace (`TENANT_NAMESPACE` from the Install file, or `fabric-edge` for the VM appliance).
+Full dial path for create: `{base_url}/{endpoint}` →  
+`https://agent-launcher.<tenant-id>.connect.abluva.com:8444/api/v1/launcher/create`
 
-6. Click **Create Resource**
+7. Click **Create Resource**
+
+For other customer services (e.g. data-privacy), use the matching `host:port` from the Connect tab as `base_url` (`https://host:port`) and set the product endpoint path as needed.
 
 ---
 
 ## Service Endpoint Available
 
-Once connected, these endpoints are available in your cluster:
-
-| Service | URL from your cluster | Purpose |
-|---------|----------------------|---------|
-| Launcher | `http://agent-svc.<namespace>.svc.cluster.local:5004` | Customer launcher |
-| Connect Agent | `connect-agent.<namespace>.svc.cluster.local:<port>` | Local listeners for Active registrations (ports managed by the Agent) |
+| Where | Service | Address | Purpose |
+|-------|---------|---------|---------|
+| **Platform → customer** | Launcher | `https://agent-launcher.<tenant-id>.connect.abluva.com:8444` (+ path) | From Connect Agent tab after reg create |
+| **Customer cluster only** | Launcher | `http://agent-svc.<namespace>.svc.cluster.local:5004` | Agent dial target — not for platform resources |
+| **Customer → platform** | Connect Agent | `connect-agent.<namespace>.svc.cluster.local:<port>` | Local listeners for Active PLATFORM registrations |
 
 ---
 
