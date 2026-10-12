@@ -78,11 +78,50 @@ agent/agent-deployment.yaml        launcher + agent-svc
 
 ## Step 5: Configure Agent Deployment
 
-`agent/agent-deployment.yaml` uses placeholders. The installer replaces only these three:
+`agent/agent-deployment.yaml` uses placeholders. The installer replaces:
 
-- `<tenant-namespace>`
-- `<tenantId>`
-- `<envid>`
+- `<tenant-namespace>` ← `TENANT_NAMESPACE`
+- `<tenantId>` ← `TENANT_ID`
+- `<envid>` ← `ENVIRONMENT_ID`
+- `<control-server-listen-port>` ← `CONTROL_SERVER_LISTEN_PORT` (when set)
+
+**Customer→Platform base URL** (launcher `INFRA_BASE_URL`):
+
+```text
+http://connect-agent.<tenant-namespace>.svc.cluster.local:<control-server-listen-port>
+```
+
+Do **not** use `http://control-server-svc.<saas-ns>.svc.cluster.local:5001` from the tenant cluster — that DNS does not resolve there.
+
+### How `CONTROL_SERVER_LISTEN_PORT` is filled
+
+1. Connect Agent opens one StreamOpen listener per Active registration (base **9443+**).
+2. Agent POSTs `listen_port` on `POST /v1/registrations/:id/observed` (Connect Agent image that includes listen-port reporting).
+3. Fabric exposes it on registrations as **`agent_listen_port`**.
+4. Abluva Connect **Install** snippet reads the PLATFORM reg `display_name=control-server` and, when known, writes `CONTROL_SERVER_LISTEN_PORT=<port>` into the downloadable env. Click **Refresh** after the Agent is **Connected**.
+
+Until that lands, the env line is commented / omitted and the launcher keeps the placeholder — set it manually (below) or re-download after Refresh, then re-run the installer or patch `Deployment/agent` `INFRA_BASE_URL`.
+
+**From Fabric (Platform):**
+
+```bash
+# After Agent reported; look for control-server.agent_listen_port
+curl -sS -H "Authorization: Bearer $TOKEN" -H "X-ABLV-Actor: ops" \
+  "http://127.0.0.1:8080/v1/tenants/${TENANT_ID}/registrations" \
+| jq '.registrations[] | select(.display_name=="control-server") | {id, agent_listen_port}'
+```
+
+**From the customer cluster (same port):**
+
+```bash
+kubectl -n "$TENANT_NAMESPACE" get svc connect-agent \
+  -o jsonpath='{.metadata.annotations.fabric\.abluva\.io/registration-ports}{"\n"}'
+# JSON: {"<reg-uuid>":9444,...} — use the UUID of display_name=control-server
+```
+
+```bash
+CONTROL_SERVER_LISTEN_PORT=9444   # example — your control-server agent_listen_port
+```
 
 **Before running the script**, edit `agent/agent-deployment.yaml` and set **`X_ABLV_PRINCIPAL`** to your login email (this becomes the `X-ABLV-Principal` header on launcher → control-server calls).
 
@@ -93,7 +132,14 @@ agent/agent-deployment.yaml        launcher + agent-svc
   value: "tenant-admin"          # keep unless your role differs
 ```
 
-Everything else in that file (including SaaS control-server URL and SaaS IDs) is used as-is. You do not paste a SaaS API key into the launcher YAML.
+SaaS tenant/environment IDs in the YAML stay as platform constants. You do not paste a SaaS API key into the launcher YAML.
+
+**Privacy / other launch agents** use the same pattern (`deploy/privacy/`):
+
+| Env | Fabric URL |
+|---|---|
+| control-server | `http://connect-agent.<ns>.svc:<control-server-listen-port>/…` |
+| unified-access | `http://connect-agent.<ns>.svc:<unified-access-listen-port>` |
 
 Put `ca.crt` and the Install env file next to the script you will run (Step 6). Ensure `BOOTSTRAP_TOKEN` and `ENVIRONMENT_ID` are set in the env file.
 
@@ -238,9 +284,9 @@ For other customer services (e.g. data-privacy), use the matching `host:port` fr
 
 ### Launcher cannot reach control-server
 
-**Cause**: Short service name used instead of the SaaS control-server FQDN, or wrong SaaS namespace.
+**Cause**: `INFRA_BASE_URL` still points at SaaS in-cluster DNS, or wrong Connect Agent listener port.
 
-**Fix**: Keep the filled `INFRA_BASE_URL` in `agent/agent-deployment.yaml` as shipped (FQDN). Do not replace it with a short name from the tenant namespace.
+**Fix**: Use `http://connect-agent.<ns>.svc.cluster.local:<port>` where `<port>` is the `control-server` PLATFORM registration listener from the `connect-agent` Service annotation. Patch the Deployment if the port was unknown at install time.
 
 ### Agent image pull error
 
