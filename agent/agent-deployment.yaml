@@ -78,7 +78,7 @@ spec:
             # SaaS control-server FQDN (same cluster). Short name will not resolve
             # from the tenant namespace.
             - name: INFRA_BASE_URL
-              value: "http://control-server-svc.3407e407-792a-452d-8bb4-03c54ac34d52-5620f907-0281-497d-9098-8c.svc.cluster.local:5001"
+              value: "http://connect-agent.<tenant-namespace>.svc.cluster.local:<control-server-listen-port>"
             - name: X_ABLV_TENANT_ID
               value: "<tenantId>"
             - name: X_ABLV_ENVIRONMENT_ID
