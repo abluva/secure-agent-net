@@ -32,7 +32,7 @@
 #   - Outbound TCP to FABRIC_GATEWAY_ADDRESS host:port (typically :8443)
 #     and HTTPS to FABRIC_CONTROL_PLANE_URL
 #   - daemonset.yaml + networkpolicy-example.yaml next to this script
-#     (symlinks to ../../kubernetes/ — same manifests as tenant-start.sh)
+#     (same content as ../../kubernetes/ — keep copies in sync)
 #
 # What gets installed:
 #   - /usr/local/bin/k3s (single static binary, ~60MB)
@@ -54,7 +54,7 @@ AGENT_IMAGE="${AGENT_IMAGE:-ghcr.io/abluva/connect-agent:latest}"
 SAAS_NAMESPACE="${SAAS_NAMESPACE:-3407e407-792a-452d-8bb4-03c54ac34d52-5620f907-0281-497d-9098-8c}"
 NAMESPACE="fabric-edge"
 FABRIC_IDENTITY_STORE="kubernetes"
-# Same YAML as kubernetes customers (symlink in this dir → ../../kubernetes/)
+# YAML next to this script (copies of kubernetes/ manifests).
 DAEMONSET_YAML="${DAEMONSET_YAML:-$SCRIPT_DIR/daemonset.yaml}"
 NP_YAML="${NP_YAML:-$SCRIPT_DIR/networkpolicy-example.yaml}"
 
@@ -117,7 +117,7 @@ fi
 
 if [[ ! -f "$DAEMONSET_YAML" ]]; then
   echo "ERROR: missing DaemonSet YAML: $DAEMONSET_YAML"
-  echo "       Expected symlink/copy of ../../kubernetes/daemonset.yaml next to install.sh"
+  echo "       Expected daemonset.yaml next to install.sh (same as kubernetes/daemonset.yaml)."
   exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
